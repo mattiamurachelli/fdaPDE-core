@@ -94,6 +94,8 @@ template <int N> class GradientDescent {
     double value() const { return value_; }
     int n_iter() const { return n_iter_; }
     const std::vector<double>& values() const { return values_; }
+    // Tolerance setter method for Augmented Lagrangian method
+    void set_tol(double tol) { tol_ = tol; }
 };
 
 }   // namespace fdapde
