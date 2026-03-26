@@ -113,6 +113,23 @@ public:
     // Solve method for problem resolution
     template <typename ObjectiveT, typename ConstraintT, typename... Callbacks>
     vector_t solve(ObjectiveT&& objective, const ConstraintT& constraints, const vector_t& x0, Callbacks&&... callbacks) {
+
+        // Static assertions to check that the objective function is callable at vector_t and return double
+        fdapde_static_assert(
+            std::is_same<decltype(std::declval<std::decay_t<ObjectiveT>>().operator()(vector_t())) FDAPDE_COMMA double>
+            ::value,INVALID_CALL_TO_SOLVE__OBJECTIVE_FUNCTOR_NOT_CALLABLE_AT_VECTOR_TYPE
+        );
+
+        // Extract the type of a single constraint from the constraints container
+        using constraint_t = std::remove_cv_t<std::remove_reference_t<decltype(std::declval<const ConstraintT&>()
+            [std::declval<std::size_t>()])>>;
+
+        // Static assertions to check that the constraint functor is callable at vector_t and return double
+        fdapde_static_assert(
+            std::is_same<decltype(std::declval<constraint_t>().operator()(vector_t())) FDAPDE_COMMA double>
+            ::value,INVALID_CALL_TO_SOLVE__CONSTRAINT_FUNCTOR_NOT_CALLABLE_AT_VECTOR_TYPE
+        );
+
         // Copy x0 to a local variable since x0 is passed by const reference
         vector_t x = x0;
 
