@@ -142,7 +142,7 @@ public:
 
         // Compute the constrained violation for the initial point
         for(std::size_t i = 0; i < constraints.size(); ++i) {
-            if (constraints[i].is_inequality_ == true) {                 // Inequality constraint
+            if (constraints[i].is_inequality_ == true) {                // Inequality constraint
                 if (constraints[i](x) > 0 ) {                           // Add a term only if constraint is violated
                     res += constraints[i](x)*constraints[i](x);
                 }
@@ -168,12 +168,12 @@ public:
             // We want to solve subproblems with increasing accuracy to avoid getting caught in local minima of the
             // unconstrained problem that may keep us away from the solution of the constrained problem
             optimizer_.set_tol(std::min(1e-4, std::max(res, tol_)));
-            //Debugging step
-            std::cout << "Using tolerance " << std::min(1e-4, std::max(res, tol_)) << "\n";
+            // Debugging step
+            // std::cout << "Using tolerance " << std::min(1e-4, std::max(res, tol_)) << "\n";
             // Solve the current subproblem using the optimizer
             optimizer_.optimize(lagrangian_objective, x, std::forward<Callbacks>(callbacks)...);
             
-            // Extract and store results for the current iteraiton
+            // Extract and store results for the current iteration
             num_iter_.push_back(optimizer_.n_iter());       // Number of iterations for the current subproblem
             optimum_.push_back(optimizer_.optimum());       // Optimal solution for the current subproblem
             x = optimizer_.optimum();                       // Optimal solution for current subproblem is starting point for next iteration
@@ -182,7 +182,7 @@ public:
             // Compute the constraint residual for updates on mu_ and tol
             res = 0.0;
             for(std::size_t i = 0; i < constraints.size(); ++i) {
-                if (constraints[i].is_inequality_ == true) {                // Inequality constraint
+                if (constraints[i].is_inequality_ == true) {               // Inequality constraint
                     if (constraints[i](x) > 0 ) {                          // Add a term only if constraint is violated
                         res += constraints[i](x)*constraints[i](x);
                     }
@@ -194,7 +194,7 @@ public:
 
             // Update Lagrange multipliers (Nocedal & Wright, 17.49)
             for (std::size_t j = 0; j < constraints.size(); ++j) {
-                if (constraints[j].is_inequality_ == true) {                   // Inequality constraint
+                if (constraints[j].is_inequality_ == true) {                  // Inequality constraint
                     lambda[j] = std::max(0.0 , lambda[j] + mu_ * constraints[j](x));
                 } else {                                                      // Equality constraint
                     lambda[j] = lambda[j] - constraints[j](x) / mu_;
@@ -213,7 +213,7 @@ public:
             const double grad_norm = grad(x).norm();
 
             // Debugging step
-            std::cout << "Constraint violation: " << res << ", mu: " << mu_ << ", Gradient norm: " << grad_norm << std::endl;
+            // std::cout << "Constraint violation: " << res << ", mu: " << mu_ << ", Gradient norm: " << grad_norm << std::endl;
 
             // End condition
             if ( grad_norm + res < tol_) { break; }
