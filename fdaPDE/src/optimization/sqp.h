@@ -42,26 +42,41 @@ public:
         double res = objective(x);
 
         for(int i = 0; i < constraints.size(); ++i) {
-            res += (1/mu_) * std::abs(constraints[i](x));
+            if(constraints[i].is_inequality) {            // Inequality constraints
+                res += (1/mu_) * std::max(0, constraints[i](x));
+            } else {                                      // Equality constraints
+                res += (1/mu_) * std::abs(constraints[i](x));
+            }  
         }
 
         return res;
     }
     // Directional derivative in p direction method
-    double derivative(const vector_t& x, const vector_t p) {
+    double derivative(const vector_t& x, const vector_t p) const {
 
-        // TO BE DONE
-        double res = 
+        double sign = 0;
+        double res = objective.gradient(x).transpose() * p;
+
+        for(int i=0; i < constraints.size(); ++i) {
+            if(constraints[i].is_inequality) {              // Inequality constraints
+                res += (1/mu_) * std::max(0, constraints[i](x) * (constraints[i].gradient(x).transpose() * p) / (constraints[i](x)));
+            } else {
+                sign = (constraints[i](x) > 0) ? 1 : -1;    // Equality constraints
+                res += (1/mu_) * sign * constraints[i].gradient(x).transpose() * p;
+            }
+        }
+
+        return res;
     }
     
-    // Setters for lambda and mu
+    // Setter for mu
     void set_mu(const double mu) {mu_ = mu;}
 };
 
 template<int N, typename Optimizer>
 class SQP {
 private:
-    using vector_t = std::conditional_t<N == Eigen::Dynamic,Eigen::Matrix<double, Eigen::Dynamic, 1>,Eigen::Matrix<double, N, 1>>;
+    using vector_t = std::conditional_t<N == Eigen::Dynamic, Eigen::Matrix<double, Eigen::Dynamic, 1>, Eigen::Matrix<double, N, 1>>;
 
     double mu_ =;                       // Initial (maximum) penalty parameter
     double min_mu_ =;                  // Minimum penalty parameter
@@ -95,6 +110,81 @@ private:
 public:
     // Constructors
     // TO BE DONE!
+    template<int N>
+    vector_t solve_problem(Eigen::Matrix<double, N, N>& B_k, vector_t& grad_f_k,
+        std::vector<double> &c_k, Eigen::Matrix<double, Eigen::Dynamic , N> A_k, std::vector<bool>& inequality_flag) const {
+
+        // Create solution vectors
+        Eigen::Matrix<double, Eigen::Dynamic, 1> solution;
+        vector_t p_k;
+        Eigen::Matrix<double, Eigen::Dynamic, 1> lambda;
+
+        // Other useful variables
+        double alpha_k = 1;
+        double temp;
+        int blocking_constraint = -1;
+
+        // Compute a feasible starting point
+        vector_t x_k = compute_feasible_point();         // TO BE DONE!
+
+        // Create and set-up the working set
+        std::vector<int> working_set{};
+        // We initialize it with equality constraints only (they are active for sure)
+        for(int i = 0; i < inequality_flag.size(); ++i) {
+            if(!inequality_flag[i]) { working_set.push_back(i); }
+        }
+        
+        while() {
+            // Find p_k. We directly solve the KKT system
+            // We first assemble the matrices
+            // We begin by extracting the submatrices and subvectors associated to the working set
+            int m_w = working_set.size();                                 // working set dimension
+            double counter = 0;
+            Eigen::Matrix<double, m_w, N> A_k_w;                          // Jacobian restriction
+            Eigen::Matrix<double, m_w, 1> c_k_w;                          // Constraints restriction
+            for(auto value : working_set) {
+                A_k_w.row(counter) = A_k.row(value);
+                c_k_w(counter) = c_k(value);
+                ++counter;
+            }
+            // Now we assign the blocks to their positions
+            Eigen::Matrix<double, N + m_w, N + m_w> KKT;
+            Eigen::Matrix<double, N + m_w, 1> rhs;
+            // Matrix
+            KKT.topLeftCorner(N, N) = B_k;
+            KKT.topRightCorner(N, m_w) = A_k_w.transpose();
+            KKT.bottomLeftCorner(m_w, N) = A_k_w;
+            KKT.bottomRightCorner(m_w, m_w).setZero();
+            // Rhs
+            rhs.head(n) = -grad_f_k;
+            rhs.tail(m_w) = -c_k_w;
+            // Solve the system
+            solution = KKT.ldlt().solve(rhs);
+            // Extract result
+            p_k = solution.head(N);
+            lambda = solution.tail(m_w);
+            if( p_k.norm() < 1e-6) {    // p_k == 0
+
+            } else {                    // p_k != 0
+                // Compute alpha_k
+                alpha_k = 1;
+                for(int i = 0; i < inequality_flag.size(); ++i) {
+                    if(working_set.find(i) == working_set.end() && A_k.row(i) * p_k < 0) {
+                        temp = - c_k / (A_k.row(i) * p_k);
+                        if(temp < alpha_k) { 
+                            alpha_k = temp;
+                            blocking_constraint = i;
+                        }
+                    }
+                }
+                // update x
+                x_k = x_k + alpha_k * p_k;
+                if(alpha_k != 1) {                                      // if there was a blocking constraint
+                    working_set.push_back(blocking_constraint);         // we add it to the working set
+                } // else, the working set remains unchanged
+            }
+        }
+    }
 
     // Solve method for problem resolution
     template <typename ObjectiveT, typename ConstraintT>
@@ -128,16 +218,22 @@ public:
         MeritFunction<N, ObjectiveT, ConstraintT> phi(objective, constraints);
 
         // Other necessary variables for the algorithm
-        double gamma = 0;                           // Used in mu update
-        double alpha_k = 1;                         // Used for step length computation
-        double theta_k = 1;                         // Used in Algorithm 18.2
-        double temp1;                               // Temporary support double variable 1
-        double temp2;                               // Temporary support double variable 2
-        Eigen::VectorXd rhs;                        // Useful for lambda update computation
-        Eigen::MatrixXd M;                          // Useful for lambda update computation
-        vector_t s_k;                               // Useful for Hessian approximation (BFGS update)
-        vector_t y_k;                               // Useful for Hessian approximation (BFGS update)
-        vector_t r_k;                               // Useful for Hessian approximation (BFGS update)
+        double gamma = 0;                                               // Used in mu update
+        double alpha_k = 1;                                             // Used for step length computation
+        double theta_k = 1;                                             // Used in Algorithm 18.2
+        double temp1;                                                   // Temporary support double variable 1
+        double temp2;                                                   // Temporary support double variable 2
+        Eigen::Matrix<double, Eigen::Dynamic, 1> rhs;                   // Useful for lambda update computation
+        Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> M;        // Useful for lambda update computation
+        vector_t s_k;                                                   // Useful for Hessian approximation (BFGS update)
+        vector_t y_k;                                                   // Useful for Hessian approximation (BFGS update)
+        vector_t r_k;                                                   // Useful for Hessian approximation (BFGS update)
+        std::vector<bool> inequality_flag(false, constraints.size());   // Useful for active-set method
+
+        // Extract constraints types to pass to the SQP active-set method problem
+        for(int i = 0; i < constraints.size(); ++i) {
+            if(constraints[i].is_inequality) { inequality_flag[i] = true; }
+        }
 
         // Create a vector of Lagrange multipliers, we initialize it to zero for all constraints
         // This is a common choice in many libraries, but other initializations could be performed
@@ -151,7 +247,7 @@ public:
         vector_t grad_f_k = objective.gradient()(x_old);
         std::vector<double> c_k(constraints.size());
         for(std::size_t i = 0; i < constraints.size(); ++i) { c_k[i] = constraints[i](x_old); }
-        Eigen::Matrix<double, constraints.size(), N> A_k;
+        Eigen::Matrix<double, Eigen::Dynamic, N> A_k;
         for(std::size_t i = 0; i < constraints.size(); ++i) { A_k.row(i) = constraints[i].gradient(x_old).transpose(); }
 
         // Main loop of the SQP method
@@ -161,7 +257,7 @@ public:
             if() {break;}
 
             // Solve the current quadratic problem
-            p_k = solve_problem(B_k, grad_f_k, c_k, A_k);
+            p_k = solve_problem<N>(B_k, grad_f_k, c_k, A_k, inequality_flag);
 
             // Choose mu such that p_k is a descent direction for the merit function at x_k
             // We begin by computing gamma
