@@ -73,7 +73,7 @@ public:
     void set_mu(const double mu) {mu_ = mu;}
 };
 
-template<int N, typename Optimizer>
+template<int N>
 class SQP {
 private:
     using vector_t = std::conditional_t<N == Eigen::Dynamic, Eigen::Matrix<double, Eigen::Dynamic, 1>, Eigen::Matrix<double, N, 1>>;
@@ -89,35 +89,62 @@ private:
     std::vector<vector_t> optimum_{};       // Optimal solution for each subproblem
     std::vector<double> values_{};          // Objective function values at the optimal solution for each subproblem
 
-    // Function to compute the gradient of the Lagrangian (required in solve() method)
-    template <ObjectiveT, ConstraintT>
+    // ACCESSORY FUNCTIONS FOR SOLVE METHOD
+
+    // Function to compute the gradient of the Lagrangian
+    template <typename ObjectiveT, typename ConstraintT>
     vector_t lagrangian_gradient(const vector_t& x, const std::vector>double>& lambda,
         const ObjectiveT& objective, const ConstraintT& constraints) {
 
-        double res = objective.gradient(x);
+        vector_t res = objective.gradient(x);
 
         for(int i = 0; i < constraints.size(); ++i) {
+            /* // GPT DICE CHE QUESTA FORMULA E' SBAGLIATA
             if(constraints[i].is_inequality) {              // Inequality constraints
                 res += lambda[i]*constraints[i].gradient(x);
             } else {                                        // Equality constraints
                 res -= lambda[i]*constraints[i].gradient(x);
-            }
+            }*/
+           res += lambda[i] * constraints[i].gradient(x);
         }
 
         return res;
     }
 
-public:
-    // Constructors
-    // TO BE DONE!
-    template<int N>
+    template<typename ConstraintT>
+    vector_t compute_feasible_point(vector_t& x0, ConstraintT& constraints) {
+        // We solve an unconstrained problem in order to find a feasible starting point
+        // for our local QP
+
+        // Construct the objective function
+        ScalarField<N> obj;
+        obj = [&constraints] (const vector_t& x) -> double {
+            double res = 0;
+            for(int i = 0; i < constraints.size(); ++i) {
+                if(constraints[i].is_inequality) {                // Inequality constraints
+                    res += std::max(0, constraints[i](x));
+                } else {                                          // Equality constraints
+                    res += constraints[i](x);
+                }
+            }
+            return res;
+        };
+
+        // And now minimize it
+        BFGS<N> optimizer;
+        optimizer.set_tol(1e-10);
+        return optimizer.optimize(obj, x0, BacktrackingLineSearch());
+    }
+    
+    template<int N, typename ConstraintT>
     vector_t solve_problem(Eigen::Matrix<double, N, N>& B_k, vector_t& grad_f_k,
-        std::vector<double> &c_k, Eigen::Matrix<double, Eigen::Dynamic , N> A_k, std::vector<bool>& inequality_flag) const {
+        Eigen::Matrix<double, Eigen::Dynamic, 1> &c_k, Eigen::Matrix<double, Eigen::Dynamic , N> A_k, std::vector<bool>& inequality_flag,
+        Eigen::Matrix<double, Eigen::Dynamic, 1>& lambda, vector_t& x0, ConstraintT& constraints) const {
 
         // Create solution vectors
-        Eigen::Matrix<double, Eigen::Dynamic, 1> solution;
+        Eigen::Matrix<double, Eigen::Dynamic, 1> solution;      
         vector_t p_k;
-        Eigen::Matrix<double, Eigen::Dynamic, 1> lambda;
+        Eigen::Matrix<double, Eigen::Dynamic, 1> lambda_w;              // working set lagrange multipliers
 
         // Other useful variables
         double alpha_k = 1;
@@ -125,13 +152,22 @@ public:
         int blocking_constraint = -1;
 
         // Compute a feasible starting point
-        vector_t x_k = compute_feasible_point();         // TO BE DONE!
+        vector_t x_k = compute_feasible_point<ConstraintT>(x0, constraints);
 
         // Create and set-up the working set
         std::vector<int> working_set{};
-        // We initialize it with equality constraints only (they are active for sure)
+        // We initialize it with equality constraints and active inequality constraints
         for(int i = 0; i < inequality_flag.size(); ++i) {
-            if(!inequality_flag[i]) { working_set.push_back(i); }
+            if(!inequality_flag[i]) {                                   // Equality constraints
+                working_set.push_back(i);
+            } else {
+                if() // QUI BISOGNEREBBE INCLUDERE ANCHE I VINCOLI DI DISUGUAGLIANZA ATTIVI
+                     // AD OGNI MODO, LA PHASE 1 CAUSE DELLE INCONGRUENZE PERCHE NOI INIZIALIZZIAMO
+                     // TUTTO PER x_k DEL solve() CHE QUI E' SOLO x0, POI CI SPOSTIAMO IN UN ALTRO PUNTO x_k
+                     // PRIMA DI INIZIARE A RISOLVERE. RIGUARDARE LA TEORIA O SPOSTARE compute_feasible_point()
+                     // IN solve() E USARLO UNA VOLTA SOLA (FORSE?)
+            }
+
         }
         
         while() {
@@ -156,21 +192,21 @@ public:
             KKT.bottomLeftCorner(m_w, N) = A_k_w;
             KKT.bottomRightCorner(m_w, m_w).setZero();
             // Rhs
-            rhs.head(n) = -grad_f_k;
+            rhs.head(N) = -grad_f_k;
             rhs.tail(m_w) = -c_k_w;
             // Solve the system
             solution = KKT.ldlt().solve(rhs);
             // Extract result
             p_k = solution.head(N);
-            lambda = solution.tail(m_w);
+            lambda_w = solution.tail(m_w);
             if( p_k.norm() < 1e-6) {    // p_k == 0
-
+                // TO BE DONE
             } else {                    // p_k != 0
                 // Compute alpha_k
                 alpha_k = 1;
                 for(int i = 0; i < inequality_flag.size(); ++i) {
-                    if(working_set.find(i) == working_set.end() && A_k.row(i) * p_k < 0) {
-                        temp = - c_k / (A_k.row(i) * p_k);
+                    if(std::find(working_set.begin(), working_set.end(), i) == working_set.end() && A_k.row(i) * p_k < 0) {
+                        temp = - c_k(i) / (A_k.row(i) * p_k + 1e-12);
                         if(temp < alpha_k) { 
                             alpha_k = temp;
                             blocking_constraint = i;
@@ -184,7 +220,20 @@ public:
                 } // else, the working set remains unchanged
             }
         }
+
+        // Before exiting we need to restore the full vector of Lagrange multipliers, setting to
+        // zero the ones associated to non-active constraints
+        lambda.setZero();
+        for(int i = 0; i < working_set.size(); ++i) {
+            lambda[working_set[i]] = lambda_w(i);
+        }
+
+        return x_k;
     }
+
+public:
+    // Constructors
+    // TO BE DONE!
 
     // Solve method for problem resolution
     template <typename ObjectiveT, typename ConstraintT>
@@ -228,7 +277,7 @@ public:
         vector_t s_k;                                                   // Useful for Hessian approximation (BFGS update)
         vector_t y_k;                                                   // Useful for Hessian approximation (BFGS update)
         vector_t r_k;                                                   // Useful for Hessian approximation (BFGS update)
-        std::vector<bool> inequality_flag(false, constraints.size());   // Useful for active-set method
+        std::vector<bool> inequality_flag(constraints.size(), false);   // Useful for active-set method
 
         // Extract constraints types to pass to the SQP active-set method problem
         for(int i = 0; i < constraints.size(); ++i) {
@@ -237,7 +286,7 @@ public:
 
         // Create a vector of Lagrange multipliers, we initialize it to zero for all constraints
         // This is a common choice in many libraries, but other initializations could be performed
-        std::vector<double> lambda(constraints.size(), 0.0);
+        Eigen::Matrix<double, Eigen::Dynamic, 1> lambda(constraints.size(), 0.0);
 
         // Create the approximation of the Hessian of the Lagrangian, we initialize it to the identity matrix for the first iteration
         Eigen::Matrix<double, N, N> B_k = Eigen::Matrix<double, N, N>::Identity();
@@ -245,9 +294,9 @@ public:
         // Evaluate f(x0), grad(f(x0)), c_i(x0) and A(x0)
         double f_k = objective(x_old);
         vector_t grad_f_k = objective.gradient()(x_old);
-        std::vector<double> c_k(constraints.size());
+        Eigen::Matrix<double, Eigen::Dynamic, 1> c_k(constraints.size());
         for(std::size_t i = 0; i < constraints.size(); ++i) { c_k[i] = constraints[i](x_old); }
-        Eigen::Matrix<double, Eigen::Dynamic, N> A_k;
+        Eigen::Matrix<double, Eigen::Dynamic, N> A_k(constraints.size(), N);
         for(std::size_t i = 0; i < constraints.size(); ++i) { A_k.row(i) = constraints[i].gradient(x_old).transpose(); }
 
         // Main loop of the SQP method
@@ -257,10 +306,11 @@ public:
             if() {break;}
 
             // Solve the current quadratic problem
-            p_k = solve_problem<N>(B_k, grad_f_k, c_k, A_k, inequality_flag);
+            p_k = solve_problem<N, ConstraintT>(B_k, grad_f_k, c_k, A_k, inequality_flag, lambda, constraints);
 
             // Choose mu such that p_k is a descent direction for the merit function at x_k
             // We begin by computing gamma
+            gamma = 0;
             for(int i = 0; i < constraints.size(); ++i) {
                 if(std::abs(lambda[i]) > gamma) {gamma = std::abs(lambda[i]); }
             }
@@ -282,10 +332,13 @@ public:
             for(std::size_t i = 0; i < constraints.size(); ++i) { c_k[i] = constraints[i](x_new); }
             for(std::size_t i = 0; i < constraints.size(); ++i) { A_k.row(i) = constraints[i].gradient()(x_new).transpose(); }
 
+            // GPT says this is not necessary, we should be using directly the multipliers from the local QP
+            /*
             // Compute Lagrange multipliers update
             rhs = - A_k * grad_f_k;
             M = A_k * A_k.transpose();
             lambda = M.ldlt().solve(rhs);
+            */
 
             // Hessian approximation (BFGS update)
             s_k = x_new - x_old;
@@ -310,7 +363,7 @@ public:
 
             // Compute B_k
 
-            B_k = B_k - (B_k * (s_k * s_k.transpose()) * B_k)/temp2 + (r_k * r_k.tranpose())/(s_k.transpose() * r_k);
+            B_k = B_k - (B_k * (s_k * s_k.transpose()) * B_k)/(temp2 + 1e-12) + (r_k * r_k.transpose())/(s_k.transpose() * r_k);
 
             // Update x_old
             x_old = x_new;
