@@ -39,35 +39,47 @@ public:
     // Call operator 
     double operator()(const vector_t& x) const {
 
-        double res = objective(x);
+        double res = objective_(x);
 
-        for(int i = 0; i < constraints.size(); ++i) {
-            if(constraints[i].is_inequality) {            // Inequality constraints
-                res += (1/mu_) * std::max(0, constraints[i](x));
+        for(int i = 0; i < constraints_.size(); ++i) {
+            if(constraints_[i].is_inequality) {            // Inequality constraints
+                res += (1/mu_) * std::max(0, constraints_[i](x));
             } else {                                      // Equality constraints
-                res += (1/mu_) * std::abs(constraints[i](x));
+                res += (1/mu_) * std::abs(constraints_[i](x));
             }  
         }
 
         return res;
     }
+
     // Directional derivative in p direction method
-    double derivative(const vector_t& x, const vector_t p) const {
+    double derivative(const vector_t& x, const vector_t& p) const {
+        double res = objective_.gradient(x).transpose() * p;
+        const double eps = 1e-12;
 
-        double sign = 0;
-        double res = objective.gradient(x).transpose() * p;
+        for (int i = 0; i < constraints_.size(); ++i) {
+            double ci  = constraints_[i](x);
+            double dci = constraints_[i].gradient(x).transpose() * p;
 
-        for(int i=0; i < constraints.size(); ++i) {
-            if(constraints[i].is_inequality) {              // Inequality constraints
-                res += (1/mu_) * std::max(0, constraints[i](x) * (constraints[i].gradient(x).transpose() * p) / (constraints[i](x)));
+            if (constraints_[i].is_inequality) {
+                if (ci > eps) {
+                    res += (1.0 / mu_) * dci;
+                } else if (std::abs(ci) <= eps) {
+                    res += (1.0 / mu_) * std::max(0.0, dci);
+                }
             } else {
-                sign = (constraints[i](x) > 0) ? 1 : -1;    // Equality constraints
-                res += (1/mu_) * sign * constraints[i].gradient(x).transpose() * p;
+                if (ci > eps) {
+                    res += (1.0 / mu_) * dci;
+                } else if (ci < -eps) {
+                    res += (1.0 / mu_) * (-dci);
+                } else {
+                    res += (1.0 / mu_) * std::abs(dci);
+                }
             }
         }
 
         return res;
-    }
+    }   
     
     // Setter for mu
     void set_mu(const double mu) {mu_ = mu;}
@@ -78,14 +90,13 @@ class SQP {
 private:
     using vector_t = std::conditional_t<N == Eigen::Dynamic, Eigen::Matrix<double, Eigen::Dynamic, 1>, Eigen::Matrix<double, N, 1>>;
 
-    double mu_ =;                       // Initial (maximum) penalty parameter
-    double min_mu_ =;                  // Minimum penalty parameter
-    size_t num_iter_{};                 // Number of iterations for each subproblem
-    int max_iter_ = ;                    // Maximum number of subproblems
-    double tol_ = ;                     // Tolerance for convergence check on Lagrangian gradient update
-    double tau_ =;                     // Parameter for mu update based on residual decrease
-    double eta_ =;
+    double mu_ = 1e2;                       // Initial penalty parameter
+    int max_iter_ = 500;                    // Maximum number of subproblems
+    double tol_ = 5e-6;                     // Tolerance for convergence check on Lagrangian gradient update
+    double tau_ = 0.75;                     // Parameter for alpha reduction during LineSearch
+    double eta_ = 0.25;                     // Parameter for LineSearch
 
+    std::vector<int> num_iter_{};           // Number of iterations for each subproblem
     std::vector<vector_t> optimum_{};       // Optimal solution for each subproblem
     std::vector<double> values_{};          // Objective function values at the optimal solution for each subproblem
 
@@ -93,7 +104,7 @@ private:
 
     // Function to compute the gradient of the Lagrangian
     template <typename ObjectiveT, typename ConstraintT>
-    vector_t lagrangian_gradient(const vector_t& x, const std::vector>double>& lambda,
+    vector_t lagrangian_gradient(const vector_t& x, const Eigen::Matrix<double, Eigen::Dynamic, 1>& lambda,
         const ObjectiveT& objective, const ConstraintT& constraints) {
 
         vector_t res = objective.gradient(x);
@@ -112,7 +123,7 @@ private:
     }
 
     template<typename ConstraintT>
-    vector_t compute_feasible_point(vector_t& x0, ConstraintT& constraints) {
+    vector_t compute_feasible_point(const vector_t& x0, const ConstraintT& constraints) {
         // We solve an unconstrained problem in order to find a feasible starting point
         // for our local QP
 
@@ -124,7 +135,7 @@ private:
                 if(constraints[i].is_inequality) {                // Inequality constraints
                     res += std::max(0, constraints[i](x));
                 } else {                                          // Equality constraints
-                    res += constraints[i](x);
+                    res += constraints[i](x)*constraints[i](x);
                 }
             }
             return res;
@@ -136,10 +147,12 @@ private:
         return optimizer.optimize(obj, x0, BacktrackingLineSearch());
     }
     
-    template<int N, typename ConstraintT>
     vector_t solve_problem(Eigen::Matrix<double, N, N>& B_k, vector_t& grad_f_k,
         Eigen::Matrix<double, Eigen::Dynamic, 1> &c_k, Eigen::Matrix<double, Eigen::Dynamic , N> A_k, std::vector<bool>& inequality_flag,
-        Eigen::Matrix<double, Eigen::Dynamic, 1>& lambda, vector_t& x0, ConstraintT& constraints) const {
+        Eigen::Matrix<double, Eigen::Dynamic, 1>& lambda, const vector_t& x0) {
+
+        // Copy x0 to a local variable since x0 is passed by const reference
+        vector_t x_k = x0;
 
         // Create solution vectors
         Eigen::Matrix<double, Eigen::Dynamic, 1> solution;      
@@ -150,9 +163,9 @@ private:
         double alpha_k = 1;
         double temp;
         int blocking_constraint = -1;
-
-        // Compute a feasible starting point
-        vector_t x_k = compute_feasible_point<ConstraintT>(x0, constraints);
+        double current_inf_w;
+        int to_erase_w;
+        int iteration_counter = 0;
 
         // Create and set-up the working set
         std::vector<int> working_set{};
@@ -160,32 +173,33 @@ private:
         for(int i = 0; i < inequality_flag.size(); ++i) {
             if(!inequality_flag[i]) {                                   // Equality constraints
                 working_set.push_back(i);
-            } else {
-                if() // QUI BISOGNEREBBE INCLUDERE ANCHE I VINCOLI DI DISUGUAGLIANZA ATTIVI
-                     // AD OGNI MODO, LA PHASE 1 CAUSE DELLE INCONGRUENZE PERCHE NOI INIZIALIZZIAMO
-                     // TUTTO PER x_k DEL solve() CHE QUI E' SOLO x0, POI CI SPOSTIAMO IN UN ALTRO PUNTO x_k
-                     // PRIMA DI INIZIARE A RISOLVERE. RIGUARDARE LA TEORIA O SPOSTARE compute_feasible_point()
-                     // IN solve() E USARLO UNA VOLTA SOLA (FORSE?)
+            } else {                                                    
+                if(c_k(i) >= -1e-6) {                                   // Inequality ACTIVE constraints
+                    working_set.push_back(i);
+                }
             }
-
         }
         
         while() {
+            // We initialize the blocking constraint to -1, meaning that there is no blocking constraint for the moment
+            blocking_constraint = -1;
+            // Update iteration counter
+            iteration_counter++;
             // Find p_k. We directly solve the KKT system
             // We first assemble the matrices
             // We begin by extracting the submatrices and subvectors associated to the working set
             int m_w = working_set.size();                                 // working set dimension
-            double counter = 0;
-            Eigen::Matrix<double, m_w, N> A_k_w;                          // Jacobian restriction
-            Eigen::Matrix<double, m_w, 1> c_k_w;                          // Constraints restriction
+            int counter = 0;
+            Eigen::Matrix<double, Eigen::Dynamic, N> A_k_w(m_w, N);       // Jacobian restriction
+            Eigen::Matrix<double, Eigen::Dynamic, 1> c_k_w(m_w);          // Constraints restriction
             for(auto value : working_set) {
                 A_k_w.row(counter) = A_k.row(value);
                 c_k_w(counter) = c_k(value);
                 ++counter;
             }
             // Now we assign the blocks to their positions
-            Eigen::Matrix<double, N + m_w, N + m_w> KKT;
-            Eigen::Matrix<double, N + m_w, 1> rhs;
+            Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> KKT(N + m_w, N + m_w);
+            Eigen::Matrix<double, Eigen::Dynamic, 1> rhs(N + m_w);
             // Matrix
             KKT.topLeftCorner(N, N) = B_k;
             KKT.topRightCorner(N, m_w) = A_k_w.transpose();
@@ -199,13 +213,34 @@ private:
             // Extract result
             p_k = solution.head(N);
             lambda_w = solution.tail(m_w);
-            if( p_k.norm() < 1e-6) {    // p_k == 0
-                // TO BE DONE
-            } else {                    // p_k != 0
+            if( p_k.norm() <= 1e-6) {    // p_k == 0
+                // Check sign of inequality constraints' multipliers in the working set
+                int flag = 0;
+                for(int i = 0; i < m_w; ++i) {
+                    if(inequality_flag[working_set[i]] == true && lambda_w[i] < 0) {
+                        flag = 1;
+                    }
+                }
+                if(!flag) {                             // Optimum found
+                    num_iter_.push_back(iteration_counter);
+                    break;
+                }                  
+                // Otherwise we need to find out which constraint to remove from the working set
+                current_inf_w = std::numeric_limits<double>::max();
+                to_erase_w = -1;
+                for(int i = 0; i < m_w; ++i) {
+                    if(inequality_flag[working_set[i]] == true && lambda_w[i] < current_inf_w) {
+                        current_inf_w = lambda_w[i];
+                        to_erase_w = i;
+                    }
+                }
+                if(to_erase_w != -1) {working_set.erase(std::next(working_set.begin(), to_erase_w));}
+                // x_k+1 = x_k
+            } else {                     // p_k != 0
                 // Compute alpha_k
                 alpha_k = 1;
                 for(int i = 0; i < inequality_flag.size(); ++i) {
-                    if(std::find(working_set.begin(), working_set.end(), i) == working_set.end() && A_k.row(i) * p_k < 0) {
+                    if(std::find(working_set.begin(), working_set.end(), i) == working_set.end() && A_k.row(i) * p_k > 0) {
                         temp = - c_k(i) / (A_k.row(i) * p_k + 1e-12);
                         if(temp < alpha_k) { 
                             alpha_k = temp;
@@ -232,8 +267,9 @@ private:
     }
 
 public:
-    // Constructors
-    // TO BE DONE!
+    // Constructor
+    SQP(double mu, int max_iter, double tol, double tau, double eta) :
+        mu_(mu), max_iter_(max_iter), tol_(tol), tau_(tau), eta_(eta) {}
 
     // Solve method for problem resolution
     template <typename ObjectiveT, typename ConstraintT>
@@ -258,6 +294,8 @@ public:
         // Copy x0 to a local variable since x0 is passed by const reference
         // and declare also x_new
         vector_t x_old = x0;
+        // Find a feasible starting point
+        x_old = compute_feasible_point(x0, constraints);
         vector_t x_new = x_old;
 
         // Declare the variable for the step
@@ -286,14 +324,15 @@ public:
 
         // Create a vector of Lagrange multipliers, we initialize it to zero for all constraints
         // This is a common choice in many libraries, but other initializations could be performed
-        Eigen::Matrix<double, Eigen::Dynamic, 1> lambda(constraints.size(), 0.0);
+        Eigen::Matrix<double, Eigen::Dynamic, 1> lambda(constraints.size());
+        lambda.setZero();
 
         // Create the approximation of the Hessian of the Lagrangian, we initialize it to the identity matrix for the first iteration
         Eigen::Matrix<double, N, N> B_k = Eigen::Matrix<double, N, N>::Identity();
 
         // Evaluate f(x0), grad(f(x0)), c_i(x0) and A(x0)
         double f_k = objective(x_old);
-        vector_t grad_f_k = objective.gradient()(x_old);
+        vector_t grad_f_k = objective.gradient(x_old);
         Eigen::Matrix<double, Eigen::Dynamic, 1> c_k(constraints.size());
         for(std::size_t i = 0; i < constraints.size(); ++i) { c_k[i] = constraints[i](x_old); }
         Eigen::Matrix<double, Eigen::Dynamic, N> A_k(constraints.size(), N);
@@ -302,11 +341,24 @@ public:
         // Main loop of the SQP method
         for (int k = 0; k < max_iter_; ++k) {
             // Check termination condition
-            // to be determined, ideas : length of the step, gradient of lagrangian, complementarity conditions, constraint residual
-            if() {break;}
+            // Compute gradient norm
+            auto lag_gradient = lagrangian_gradient(x_new, lambda, objective, constraints);
+            double grad_norm = lag_gradient.norm();
+            // and residual for the stopping criterion
+            double res = 0;
+            for(int i = 0; i < constraints.size(); ++i){
+                if(constraints[i].is_inequality == true) {              // Inequality constraints
+                res += std::max(0.0, constraints[i](x_new))*std::max(0.0, constraints[i](x_new));
+            }
+                else{                                                   // Equality constraints
+                    res += constraints[i](x_new)*constraints[i](x_new);
+                }
+            }
+
+            if(grad_norm + std::sqrt(res) < tol_) {break;}
 
             // Solve the current quadratic problem
-            p_k = solve_problem<N, ConstraintT>(B_k, grad_f_k, c_k, A_k, inequality_flag, lambda, constraints);
+            p_k = solve_problem(B_k, grad_f_k, c_k, A_k, inequality_flag, lambda, x_old);
 
             // Choose mu such that p_k is a descent direction for the merit function at x_k
             // We begin by computing gamma
@@ -321,24 +373,24 @@ public:
             // Compute step length
             alpha_k = 1;
             phi.set_mu(mu_);    // Update the merit function if necessary
-            while(phi(x_old + alpha_k * p_k) > phi(x_old) + phi.derivative(x_old, p_k)) { alpha_k = alpha_k * tau_;}
+            while(phi(x_old + alpha_k * p_k) > phi(x_old) + eta_ * alpha_k * phi.derivative(x_old, p_k)) { alpha_k = alpha_k * tau_;}
 
             // Compute next point
             x_new = x_old + alpha_k * p_k;
+            // Also add it to the optimum data structure
+            optimum_.push_back(x_new);
 
             // Evaluate f(x_k), grad(f(x_k)), c_i(x_k) and A(x_k)
             f_k = objective(x_new);
-            grad_f_k = objective.gradient()(x_new);
+            values_.push_back(f_k);             // Also add it to the values data structure
+            grad_f_k = objective.gradient(x_new);
             for(std::size_t i = 0; i < constraints.size(); ++i) { c_k[i] = constraints[i](x_new); }
-            for(std::size_t i = 0; i < constraints.size(); ++i) { A_k.row(i) = constraints[i].gradient()(x_new).transpose(); }
+            for(std::size_t i = 0; i < constraints.size(); ++i) { A_k.row(i) = constraints[i].gradient(x_new).transpose(); }
 
-            // GPT says this is not necessary, we should be using directly the multipliers from the local QP
-            /*
             // Compute Lagrange multipliers update
-            rhs = - A_k * grad_f_k;
-            M = A_k * A_k.transpose();
+            rhs    = - A_k * grad_f_k;
+            M      = A_k * A_k.transpose();
             lambda = M.ldlt().solve(rhs);
-            */
 
             // Hessian approximation (BFGS update)
             s_k = x_new - x_old;
@@ -370,11 +422,11 @@ public:
 
         }
 
-        return x_k;
+        return x_new;
     }
 
     // Observers
-    size_t num_iter() const { return num_iter_; }                       // Number of iterations
+    std::vector<int> num_iter() const { return num_iter_; }             // Number of iterations
     const std::vector<vector_t>& optimum() const { return optimum_; }   // Optimal solutions
     const std::vector<double>& values() const { return values_; }       // Objective function values at the optimal solutions
 };
