@@ -42,8 +42,8 @@ public:
         double res = objective_(x);
 
         for(int i = 0; i < constraints_.size(); ++i) {
-            if(constraints_[i].is_inequality) {            // Inequality constraints
-                res += (1/mu_) * std::max(0, constraints_[i](x));
+            if(constraints_[i].is_inequality_) {            // Inequality constraints
+                res += (1/mu_) * std::max(0.0, constraints_[i](x));
             } else {                                      // Equality constraints
                 res += (1/mu_) * std::abs(constraints_[i](x));
             }  
@@ -61,7 +61,7 @@ public:
             double ci  = constraints_[i](x);
             double dci = constraints_[i].gradient(x).transpose() * p;
 
-            if (constraints_[i].is_inequality) {
+            if (constraints_[i].is_inequality_) {
                 if (ci > eps) {
                     res += (1.0 / mu_) * dci;
                 } else if (std::abs(ci) <= eps) {
@@ -92,7 +92,8 @@ private:
 
     double mu_ = 1e2;                       // Initial penalty parameter
     int max_iter_ = 500;                    // Maximum number of subproblems
-    double tol_ = 5e-6;                     // Tolerance for convergence check on Lagrangian gradient update
+    double feasibility_tol_ = 1e-8;         // Tolerance for convergence check on residual
+    double stationarity_tol_ = 1e-6;        // Tolerance for convergence check on lagrangian gradient
     double tau_ = 0.75;                     // Parameter for alpha reduction during LineSearch
     double eta_ = 0.25;                     // Parameter for LineSearch
 
@@ -110,12 +111,6 @@ private:
         vector_t res = objective.gradient(x);
 
         for(int i = 0; i < constraints.size(); ++i) {
-            /* // GPT DICE CHE QUESTA FORMULA E' SBAGLIATA
-            if(constraints[i].is_inequality) {              // Inequality constraints
-                res += lambda[i]*constraints[i].gradient(x);
-            } else {                                        // Equality constraints
-                res -= lambda[i]*constraints[i].gradient(x);
-            }*/
            res += lambda[i] * constraints[i].gradient(x);
         }
 
@@ -132,8 +127,8 @@ private:
         obj = [&constraints] (const vector_t& x) -> double {
             double res = 0;
             for(int i = 0; i < constraints.size(); ++i) {
-                if(constraints[i].is_inequality) {                // Inequality constraints
-                    res += std::max(0, constraints[i](x));
+                if(constraints[i].is_inequality_) {                // Inequality constraints
+                    res += std::max(0.0, constraints[i](x));
                 } else {                                          // Equality constraints
                     res += constraints[i](x)*constraints[i](x);
                 }
@@ -142,7 +137,7 @@ private:
         };
 
         // And now minimize it
-        BFGS<N> optimizer;
+        GradientDescent<N> optimizer;
         optimizer.set_tol(1e-10);
         return optimizer.optimize(obj, x0, BacktrackingLineSearch());
     }
@@ -152,7 +147,7 @@ private:
         Eigen::Matrix<double, Eigen::Dynamic, 1>& lambda, const vector_t& x0) {
 
         // Copy x0 to a local variable since x0 is passed by const reference
-        vector_t x_k = x0;
+        vector_t x_k = vector_t::Zero(N, 1);
 
         // Create solution vectors
         Eigen::Matrix<double, Eigen::Dynamic, 1> solution;      
@@ -180,7 +175,7 @@ private:
             }
         }
         
-        while() {
+        while(iteration_counter <= 20) {
             // We initialize the blocking constraint to -1, meaning that there is no blocking constraint for the moment
             blocking_constraint = -1;
             // Update iteration counter
@@ -206,14 +201,26 @@ private:
             KKT.bottomLeftCorner(m_w, N) = A_k_w;
             KKT.bottomRightCorner(m_w, m_w).setZero();
             // Rhs
-            rhs.head(N) = -grad_f_k;
-            rhs.tail(m_w) = -c_k_w;
+            rhs.head(N) = -grad_f_k - B_k*x_k;
+            rhs.tail(m_w) = -c_k_w - A_k_w*x_k;
             // Solve the system
             solution = KKT.ldlt().solve(rhs);
             // Extract result
             p_k = solution.head(N);
             lambda_w = solution.tail(m_w);
-            if( p_k.norm() <= 1e-6) {    // p_k == 0
+            // DEBUG
+            std::cout << "Sub-problem number " << iteration_counter << std::endl;
+            std::cout << "p_k = [" ;
+            for(int l = 0; l < p_k.size(); l++){
+                std::cout << p_k[l] << ", ";
+            }
+            std::cout << "], lambda_k = [";
+            for(int l = 0; l < lambda_w.size(); l++){
+                std::cout << lambda_w[l] << ", ";
+            }
+            std::cout << "]" << std::endl;
+            std::cout << "||p_k|| = " << p_k.norm() << std::endl;
+            if(p_k.norm() <= 1e-6) {    // p_k == 0
                 // Check sign of inequality constraints' multipliers in the working set
                 int flag = 0;
                 for(int i = 0; i < m_w; ++i) {
@@ -222,6 +229,7 @@ private:
                     }
                 }
                 if(!flag) {                             // Optimum found
+                    std::cout << "Problem terminated" << std::endl;
                     num_iter_.push_back(iteration_counter);
                     break;
                 }                  
@@ -241,7 +249,7 @@ private:
                 alpha_k = 1;
                 for(int i = 0; i < inequality_flag.size(); ++i) {
                     if(std::find(working_set.begin(), working_set.end(), i) == working_set.end() && A_k.row(i) * p_k > 0) {
-                        temp = - c_k(i) / (A_k.row(i) * p_k + 1e-12);
+                        temp = - (c_k(i) + A_k.row(i) * x_k) / (A_k.row(i) * p_k + 1e-12);
                         if(temp < alpha_k) { 
                             alpha_k = temp;
                             blocking_constraint = i;
@@ -267,9 +275,11 @@ private:
     }
 
 public:
+    // Constructor (default)
+    SQP() = default;
     // Constructor
-    SQP(double mu, int max_iter, double tol, double tau, double eta) :
-        mu_(mu), max_iter_(max_iter), tol_(tol), tau_(tau), eta_(eta) {}
+    SQP(double mu, int max_iter, double feasibility_tol, double stationarity_tol, double tau, double eta) :
+        mu_(mu), max_iter_(max_iter), feasibility_tol_(feasibility_tol), stationarity_tol_(stationarity_tol), tau_(tau), eta_(eta) {}
 
     // Solve method for problem resolution
     template <typename ObjectiveT, typename ConstraintT>
@@ -296,6 +306,8 @@ public:
         vector_t x_old = x0;
         // Find a feasible starting point
         x_old = compute_feasible_point(x0, constraints);
+        // DEBUG
+        std::cout << "Feasible Starting Point : [" << x_old.transpose() << "]" << std::endl;
         vector_t x_new = x_old;
 
         // Declare the variable for the step
@@ -319,7 +331,7 @@ public:
 
         // Extract constraints types to pass to the SQP active-set method problem
         for(int i = 0; i < constraints.size(); ++i) {
-            if(constraints[i].is_inequality) { inequality_flag[i] = true; }
+            if(constraints[i].is_inequality_) { inequality_flag[i] = true; }
         }
 
         // Create a vector of Lagrange multipliers, we initialize it to zero for all constraints
@@ -340,23 +352,6 @@ public:
 
         // Main loop of the SQP method
         for (int k = 0; k < max_iter_; ++k) {
-            // Check termination condition
-            // Compute gradient norm
-            auto lag_gradient = lagrangian_gradient(x_new, lambda, objective, constraints);
-            double grad_norm = lag_gradient.norm();
-            // and residual for the stopping criterion
-            double res = 0;
-            for(int i = 0; i < constraints.size(); ++i){
-                if(constraints[i].is_inequality == true) {              // Inequality constraints
-                res += std::max(0.0, constraints[i](x_new))*std::max(0.0, constraints[i](x_new));
-            }
-                else{                                                   // Equality constraints
-                    res += constraints[i](x_new)*constraints[i](x_new);
-                }
-            }
-
-            if(grad_norm + std::sqrt(res) < tol_) {break;}
-
             // Solve the current quadratic problem
             p_k = solve_problem(B_k, grad_f_k, c_k, A_k, inequality_flag, lambda, x_old);
 
@@ -387,35 +382,55 @@ public:
             for(std::size_t i = 0; i < constraints.size(); ++i) { c_k[i] = constraints[i](x_new); }
             for(std::size_t i = 0; i < constraints.size(); ++i) { A_k.row(i) = constraints[i].gradient(x_new).transpose(); }
 
-            // Compute Lagrange multipliers update
-            rhs    = - A_k * grad_f_k;
-            M      = A_k * A_k.transpose();
-            lambda = M.ldlt().solve(rhs);
+            // Check termination condition
+            // We both check feasibility and stationarity of the problem
+            // Feasibility
+            double feasibility = 0;
+            for(int i = 0; i < constraints.size(); ++i){
+                double c_i = constraints[i](x_old);
+                if(constraints[i].is_inequality_ == true) {              // Inequality constraints
+                feasibility += std::max(0.0, c_i) * std::max(0.0, c_i);
+            }
+                else{                                                   // Equality constraints
+                    feasibility += c_i * c_i;
+                }
+            }
+            feasibility = std::sqrt(feasibility);
+            // Stationarity
+            auto lagrangian_grad = lagrangian_gradient(x_new, lambda, objective, constraints);
+            double stationarity = lagrangian_grad.norm();
+            // DEBUG
+            std::cout << "Feasibility = " << feasibility << ", Stationarity = " << stationarity << std::endl;
+            // Check condition
+            if(feasibility < feasibility_tol_ && stationarity < stationarity_tol_) {break;}
 
             // Hessian approximation (BFGS update)
             s_k = x_new - x_old;
-            y_k = lagrangian_gradient<ObjectiveT, ConstraintT>(x_new, lambda, objective, constraints)
-                - lagrangian_gradient<ObjectiveT, ConstraintT>(x_old, lambda, objective, constraints);
 
-            // Algorithm 18.2 (Damped BFGS Updating for SQP)
-            // First compute theta_k
-            // temp1 = s_k^t y_k
-            // temp2 = s_k^t B_k s_k
-            temp1 = s_k.transpose() * y_k;
-            temp2 = s_k.transpose() * B_k * s_k;
+            // We perform the update only if s_k is non-zero
+            if(s_k.norm() > 1e-12) {
+                y_k = lagrangian_gradient<ObjectiveT, ConstraintT>(x_new, lambda, objective, constraints)
+                    - lagrangian_gradient<ObjectiveT, ConstraintT>(x_old, lambda, objective, constraints);
 
-            if(temp1 < 0.2 * temp2) {
-                theta_k = (0.8 * temp2)/(temp2 - temp1);
-            } else {
-                theta_k = 1;
+                // Algorithm 18.2 (Damped BFGS Updating for SQP)
+                // First compute theta_k
+                // temp1 = s_k^t y_k
+                // temp2 = s_k^t B_k s_k
+                temp1 = s_k.transpose() * y_k;
+                temp2 = s_k.transpose() * B_k * s_k;
+
+                if(temp1 < 0.2 * temp2) {
+                    theta_k = (0.8 * temp2)/(temp2 - temp1);
+                } else {
+                    theta_k = 1;
+                }
+
+                // Compute r_k
+                r_k = theta_k * y_k + (1 - theta_k) * B_k * s_k;
+
+                // Compute B_k
+                B_k = B_k - (B_k * (s_k * s_k.transpose()) * B_k)/(temp2 + 1e-12) + (r_k * r_k.transpose())/(s_k.transpose() * r_k);
             }
-
-            // Compute r_k
-            r_k = theta_k * y_k + (1 - theta_k) * B_k * s_k;
-
-            // Compute B_k
-
-            B_k = B_k - (B_k * (s_k * s_k.transpose()) * B_k)/(temp2 + 1e-12) + (r_k * r_k.transpose())/(s_k.transpose() * r_k);
 
             // Update x_old
             x_old = x_new;

@@ -73,6 +73,7 @@ template <typename Opt> static constexpr bool is_gradient_free_opt_v = is_gradie
 #include "src/optimization/more_thuente.h"
 #include "src/optimization/nelder_mead.h"
 #include "src/optimization/lagrangian.h"
+#include "src/optimization/sqp.h"
 
 // clang-format on
 
