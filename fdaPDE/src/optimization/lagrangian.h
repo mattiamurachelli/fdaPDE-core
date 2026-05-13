@@ -132,6 +132,7 @@ public:
 
         // Copy x0 to a local variable since x0 is passed by const reference
         vector_t x = x0;
+        vector_t x_old = x;
 
         // Create a variable to store constraint residual for mu updates and
         // one to store the gradient norm for convergence check
@@ -139,6 +140,9 @@ public:
         double r_k = std::numeric_limits<double>::max();
         double res = 0.0;
         double g_k = std::numeric_limits<double>::max();
+        // Create variables to check condition on step length
+        int short_step_counter = 0;
+        double current_step_length;
 
         // Compute the constrained violation for the initial point
         for(std::size_t i = 0; i < constraints.size(); ++i) {
@@ -163,13 +167,18 @@ public:
 
         // Main loop of the Augmented Lagrangian method
         for (int k = 0; k < max_iter_; ++k) {
-            
+            // DEBUG
+            #ifdef DEBUG
+                std::cout << "Solving subproblem " << k + 1 << std::endl;
+            #endif
             // Adjust the tolerance of the optimizer for the current subproblem
             // We want to solve subproblems with increasing accuracy to avoid getting caught in local minima of the
             // unconstrained problem that may keep us away from the solution of the constrained problem
             optimizer_.set_tol(std::min(1e-4, std::max(res, tol_)));
-            // Debugging step
-            // std::cout << "Using tolerance " << std::min(1e-4, std::max(res, tol_)) << "\n";
+            // DEBUG
+            #ifdef DEBUG
+                std::cout << "Using tolerance " << std::min(1e-4, std::max(res, tol_)) << std::endl;;
+            #endif
             // Solve the current subproblem using the optimizer
             optimizer_.optimize(lagrangian_objective, x, std::forward<Callbacks>(callbacks)...);
             
@@ -212,17 +221,26 @@ public:
             auto grad = lagrangian_objective.gradient();
             const double grad_norm = grad(x).norm();
 
-            // Debugging step
-            // std::cout << "Constraint violation: " << res << ", mu: " << mu_ << ", Gradient norm: " << grad_norm << std::endl;
+            // DEBUG
+            #ifdef DEBUG
+                std::cout << "Constraint violation: " << res << ", mu: " << mu_ << ", Gradient norm: " << grad_norm << std::endl;
+            #endif
 
             // End condition
             if ( grad_norm + res < tol_) { break; }
             g_k = grad_norm;
+            // Accessory end condition in case the optimizer gets stuck
+            current_step_length = (x - x_old).norm();
+            if(current_step_length <= 1e-10) { short_step_counter++;}
+            else { short_step_counter = 0;}
+            if(short_step_counter == 2) { break;}
 
             // Update Lagrangian objective function for the next iteration via setters
             lagrangian_objective.set_lambda(lambda);
             lagrangian_objective.set_mu(mu_);
 
+            // Update value of x_old
+            x_old = x;
         }
 
         return x;
