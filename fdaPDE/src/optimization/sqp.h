@@ -92,6 +92,7 @@ private:
 
     double mu_ = 1e2;                       // Initial penalty parameter
     int max_iter_ = 500;                    // Maximum number of subproblems
+    int max_iter_subproblem_ = 20;          // Maximum number of iterations per subproblem
     double feasibility_tol_ = 1e-8;         // Tolerance for convergence check on residual
     double stationarity_tol_ = 1e-6;        // Tolerance for convergence check on lagrangian gradient
     double tau_ = 0.75;                     // Parameter for alpha reduction during LineSearch
@@ -175,7 +176,7 @@ private:
             }
         }
         
-        while(iteration_counter <= 20) {
+        while(iteration_counter <= max_iter_subproblem_) {
             // We initialize the blocking constraint to -1, meaning that there is no blocking constraint for the moment
             blocking_constraint = -1;
             // Update iteration counter
@@ -209,17 +210,19 @@ private:
             p_k = solution.head(N);
             lambda_w = solution.tail(m_w);
             // DEBUG
-            std::cout << "Sub-problem number " << iteration_counter << std::endl;
-            std::cout << "p_k = [" ;
-            for(int l = 0; l < p_k.size(); l++){
-                std::cout << p_k[l] << ", ";
-            }
-            std::cout << "], lambda_k = [";
-            for(int l = 0; l < lambda_w.size(); l++){
-                std::cout << lambda_w[l] << ", ";
-            }
-            std::cout << "]" << std::endl;
-            std::cout << "||p_k|| = " << p_k.norm() << std::endl;
+            #ifdef DEBUG
+                std::cout << "Sub-problem number " << iteration_counter << std::endl;
+                std::cout << "p_k = [" ;
+                for(int l = 0; l < p_k.size(); l++){
+                    std::cout << p_k[l] << ", ";
+                }
+                std::cout << "], lambda_k = [";
+                for(int l = 0; l < lambda_w.size(); l++){
+                    std::cout << lambda_w[l] << ", ";
+                }
+                std::cout << "]" << std::endl;
+                std::cout << "||p_k|| = " << p_k.norm() << std::endl;
+            #endif
             if(p_k.norm() <= 1e-6) {    // p_k == 0
                 // Check sign of inequality constraints' multipliers in the working set
                 int flag = 0;
@@ -229,7 +232,10 @@ private:
                     }
                 }
                 if(!flag) {                             // Optimum found
-                    std::cout << "Problem terminated" << std::endl;
+                    // DEBUG
+                    #ifdef DEBUG
+                        std::cout << "Problem terminated" << std::endl;
+                        #endif
                     num_iter_.push_back(iteration_counter);
                     break;
                 }                  
@@ -307,7 +313,9 @@ public:
         // Find a feasible starting point
         x_old = compute_feasible_point(x0, constraints);
         // DEBUG
-        std::cout << "Feasible Starting Point : [" << x_old.transpose() << "]" << std::endl;
+        #ifdef DEBUG
+            std::cout << "Feasible Starting Point : [" << x_old.transpose() << "]" << std::endl;
+        #endif
         vector_t x_new = x_old;
 
         // Declare the variable for the step
@@ -328,6 +336,8 @@ public:
         vector_t y_k;                                                   // Useful for Hessian approximation (BFGS update)
         vector_t r_k;                                                   // Useful for Hessian approximation (BFGS update)
         std::vector<bool> inequality_flag(constraints.size(), false);   // Useful for active-set method
+        double current_step_length;                                     // Useful for accessory termination criterion
+        double short_step_counter = 0;                                  // Accessory termination criterion counter
 
         // Extract constraints types to pass to the SQP active-set method problem
         for(int i = 0; i < constraints.size(); ++i) {
@@ -353,6 +363,9 @@ public:
         // Main loop of the SQP method
         for (int k = 0; k < max_iter_; ++k) {
             // Solve the current quadratic problem
+            #ifdef DEBUG
+                std::cout << "Solving problem " << k +1 <<std::endl;
+            #endif
             p_k = solve_problem(B_k, grad_f_k, c_k, A_k, inequality_flag, lambda, x_old);
 
             // Choose mu such that p_k is a descent direction for the merit function at x_k
@@ -400,9 +413,17 @@ public:
             auto lagrangian_grad = lagrangian_gradient(x_new, lambda, objective, constraints);
             double stationarity = lagrangian_grad.norm();
             // DEBUG
-            std::cout << "Feasibility = " << feasibility << ", Stationarity = " << stationarity << std::endl;
+            #ifdef DEBUG
+                std::cout << "Feasibility = " << feasibility << ", Stationarity = " << stationarity << std::endl;
+            #endif
             // Check condition
             if(feasibility < feasibility_tol_ && stationarity < stationarity_tol_) {break;}
+            // Extra condition on the step length, useful for problems in which there are
+            // no active constraints at the minima (for problems with only inequality constraints)
+            current_step_length = (x_new - x_old).norm();
+            if(current_step_length <= 1e-10) { short_step_counter++;}
+            else { short_step_counter = 0;}
+            if(short_step_counter == 2) { break;}
 
             // Hessian approximation (BFGS update)
             s_k = x_new - x_old;
