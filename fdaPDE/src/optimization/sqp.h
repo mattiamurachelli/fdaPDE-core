@@ -102,6 +102,13 @@ private:
     std::vector<vector_t> optimum_{};       // Optimal solution for each subproblem
     std::vector<double> values_{};          // Objective function values at the optimal solution for each subproblem
 
+    // Function to clear data in order to perform multiple simulations in a row
+    void clearData() {
+        num_iter_.clear();
+        optimum_.clear();
+        values_.clear();
+    }
+
     // ACCESSORY FUNCTIONS FOR SOLVE METHOD
 
     // Function to compute the gradient of the Lagrangian
@@ -306,6 +313,9 @@ public:
             std::is_same<decltype(std::declval<constraint_t>().operator()(vector_t())) FDAPDE_COMMA double>
             ::value,INVALID_CALL_TO_SOLVE__CONSTRAINT_FUNCTOR_NOT_CALLABLE_AT_VECTOR_TYPE
         );
+
+        // Clear Data
+        this->clearData();
 
         // Copy x0 to a local variable since x0 is passed by const reference
         // and declare also x_new

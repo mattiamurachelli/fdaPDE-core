@@ -99,6 +99,13 @@ private:
 
     Optimizer optimizer_;                   // Optimizer for solving uncostrained subproblems
 
+    // Function to clear data in order to perform multiple simulations in a row
+    void clearData() {
+        num_iter_.clear();
+        optimum_.clear();
+        values_.clear();
+    }
+
 public:
     // Constructor 1 (Only optimizer, default parameters)
     Lagrangian(const Optimizer& optimizer) : optimizer_(optimizer) {}
@@ -130,9 +137,16 @@ public:
             ::value,INVALID_CALL_TO_SOLVE__CONSTRAINT_FUNCTOR_NOT_CALLABLE_AT_VECTOR_TYPE
         );
 
+        // Clear Data
+        this->clearData();
+
         // Copy x0 to a local variable since x0 is passed by const reference
         vector_t x = x0;
         vector_t x_old = x;
+
+        // Also create local copies of mu and optimizer for multiple runs
+        double mu = mu_;
+        Optimizer optimizer = optimizer_;
 
         // Create a variable to store constraint residual for mu updates and
         // one to store the gradient norm for convergence check
@@ -163,7 +177,7 @@ public:
         // Create the Lagrangian objective function
         // Remark : We minimize this function wrt x, lambda and mu are fixed for the current iteration,
         //          they are updated after every iteration in the loop below
-        LagrangianObjective<N, std::decay_t<ObjectiveT>, ConstraintT> lagrangian_objective(objective, lambda, constraints, mu_);
+        LagrangianObjective<N, std::decay_t<ObjectiveT>, ConstraintT> lagrangian_objective(objective, lambda, constraints, mu);
 
         // Main loop of the Augmented Lagrangian method
         for (int k = 0; k < max_iter_; ++k) {
@@ -174,18 +188,18 @@ public:
             // Adjust the tolerance of the optimizer for the current subproblem
             // We want to solve subproblems with increasing accuracy to avoid getting caught in local minima of the
             // unconstrained problem that may keep us away from the solution of the constrained problem
-            optimizer_.set_tol(std::min(1e-4, std::max(res, tol_)));
+            optimizer.set_tol(std::min(1e-4, std::max(res, tol_)));
             // DEBUG
             #ifdef DEBUG
                 std::cout << "Using tolerance " << std::min(1e-4, std::max(res, tol_)) << std::endl;;
             #endif
             // Solve the current subproblem using the optimizer
-            optimizer_.optimize(lagrangian_objective, x, std::forward<Callbacks>(callbacks)...);
+            optimizer.optimize(lagrangian_objective, x, std::forward<Callbacks>(callbacks)...);
             
             // Extract and store results for the current iteration
-            num_iter_.push_back(optimizer_.n_iter());       // Number of iterations for the current subproblem
-            optimum_.push_back(optimizer_.optimum());       // Optimal solution for the current subproblem
-            x = optimizer_.optimum();                       // Optimal solution for current subproblem is starting point for next iteration
+            num_iter_.push_back(optimizer.n_iter());       // Number of iterations for the current subproblem
+            optimum_.push_back(optimizer.optimum());       // Optimal solution for the current subproblem
+            x = optimizer.optimum();                        // Optimal solution for current subproblem is starting point for next iteration
             values_.push_back(objective(x));                // Objective function value at the optimal solution for current subproblem
             
             // Compute the constraint residual for updates on mu_ and tol
@@ -204,15 +218,15 @@ public:
             // Update Lagrange multipliers (Nocedal & Wright, 17.49)
             for (std::size_t j = 0; j < constraints.size(); ++j) {
                 if (constraints[j].is_inequality_ == true) {                  // Inequality constraint
-                    lambda[j] = std::max(0.0 , lambda[j] + mu_ * constraints[j](x));
+                    lambda[j] = std::max(0.0 , lambda[j] + mu * constraints[j](x));
                 } else {                                                      // Equality constraint
-                    lambda[j] = lambda[j] - constraints[j](x) / mu_;
+                    lambda[j] = lambda[j] - constraints[j](x) / mu;
                 }
             }
                 
             // Update penalty parameter (Avoid it becoming too small to prevent numerical issues!)       
             if(res > tau_*r_k) { // the residual has not decreased sufficiently, we increase the penalty (reduce mu_)
-                mu_ = std::max(mu_*scaling_factor_, min_mu_);
+                mu = std::max(mu*scaling_factor_, min_mu_);
             } // else do nothing, mu stays the same
             r_k = res;
                      
@@ -237,7 +251,7 @@ public:
 
             // Update Lagrangian objective function for the next iteration via setters
             lagrangian_objective.set_lambda(lambda);
-            lagrangian_objective.set_mu(mu_);
+            lagrangian_objective.set_mu(mu);
 
             // Update value of x_old
             x_old = x;
