@@ -410,7 +410,7 @@ public:
             // Feasibility
             double feasibility = 0;
             for(int i = 0; i < constraints.size(); ++i){
-                double c_i = constraints[i](x_old);
+                double c_i = constraints[i](x_new);
                 if(constraints[i].is_inequality_ == true) {              // Inequality constraints
                 feasibility += std::max(0.0, c_i) * std::max(0.0, c_i);
             }
